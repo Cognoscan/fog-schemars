@@ -1,0 +1,22 @@
+[package]
+name = "fog-schemars-derive"
+description = "Macros for #[derive(FogSchema)], for use with fog-schemars"
+homepage = "https://github.com/Cognoscan/fog-schema"
+repository = "https://github.com/Cognoscan/fog-schema"
+version = "0.1.0"
+authors = ["Scott Teal"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "1.0", features = ["extra-traits"] }
+serde_derive_internals = "0.28.0"
+
