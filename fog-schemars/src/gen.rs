@@ -1,7 +1,4 @@
-use std::{
-    any::TypeId,
-    collections::{BTreeMap, HashMap},
-};
+use std::collections::{BTreeMap, HashMap};
 
 use fog_pack::{
     document::Document,
@@ -10,10 +7,12 @@ use fog_pack::{
     validator::Validator,
 };
 
-use crate::FogValidate;
+use crate::{FogValidate, Identifier, Name};
 
+#[derive(Clone, Debug)]
 pub struct SchemaGenerator {
-    doc: Option<(Validator, TypeId)>,
+    // Core Schema components
+    doc: Option<(Validator, String)>,
     max_regex: u8,
     description: Option<String>,
     name: Option<String>,
@@ -21,24 +20,100 @@ pub struct SchemaGenerator {
     version: Option<Integer>,
     types: BTreeMap<String, Validator>,
     entries: BTreeMap<String, EntryItem>,
-    opt_name_tracker: HashMap<TypeId, String>,
-    name_tracker: HashMap<TypeId, String>,
-    types_source_names: BTreeMap<String, String>,
-    name_collisions_ok: bool,
+
+    // Name shortening stuff
+    long_names: Vec<Name>,
+    ident_tracker: BTreeMap<&'static str, IdentTracker>,
 }
 
+#[derive(Clone, Default, Debug)]
+struct IdentTracker {
+    exists: bool,
+    map: BTreeMap<&'static str, IdentTracker>,
+}
+
+struct FixupState<'a> {
+    map: &'a mut HashMap<Identifier, Identifier>,
+    new_mods: Vec<&'static str>,
+    full_mods: Vec<&'static str>,
+    name: &'static str,
+}
+
+impl<'a> FixupState<'a> {
+    // Insert an identifier shortener at the current state (provided the
+    // identifier is different)
+    fn shorten(&mut self) {
+        if self.new_mods == self.full_mods {
+            return;
+        }
+        assert!(
+            self.map
+                .insert(
+                    Identifier {
+                        mods: self.full_mods.clone(),
+                        name: self.name
+                    },
+                    Identifier {
+                        mods: self.new_mods.clone(),
+                        name: self.name
+                    },
+                )
+                .is_none(),
+            "Shouldn't be creating more than one shortener for a unique name"
+        );
+    }
+}
+
+impl IdentTracker {
+    // Update the name tracker based on this incoming token set
+    fn modify<T>(&mut self, mut mods: T)
+    where
+        T: Iterator<Item = &'static str>,
+    {
+        match mods.next() {
+            None => self.exists = true,
+            Some(s) => self.map.entry(s).or_default().modify(mods),
+        }
+    }
+
+    // Try to shorten the names in this name tracker.
+    fn shorten(&self, state: &mut FixupState) {
+        if self.exists {
+            state.shorten();
+        }
+        if !self.exists && self.map.len() == 1 {
+            let (k, v) = self.map.first_key_value().unwrap();
+            state.full_mods.push(k);
+            v.shorten(state);
+            state.full_mods.pop();
+        } else {
+            for (k, v) in self.map.iter() {
+                state.full_mods.push(k);
+                state.new_mods.push(k);
+                v.shorten(state);
+                state.full_mods.pop();
+                state.new_mods.pop();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct EntryItem {
     validator: Validator,
     compress: Option<Compress>,
-    type_id: TypeId,
+    type_name: String,
 }
 
 impl SchemaGenerator {
-    /// Start generating a new schema. This is private because we're supposed to
-    /// always start off with a validator for the document, but we can't
-    /// actually do that so we're only making it *look* like that's so.
-    fn init() -> Self {
-        Self {
+    /// Start generating a new schema for a document that passes the validator
+    /// for the given type.
+    ///
+    /// When the schema has been generated, it's recommended practice to take
+    /// the schema hash and compare the generate schema against it in a unit
+    /// test, which can ensure the schema stays stable over time.
+    pub fn new<T: FogValidate>() -> Self {
+        let mut this = Self {
             doc: None,
             max_regex: 0,
             description: None,
@@ -47,47 +122,13 @@ impl SchemaGenerator {
             doc_compress: None,
             types: BTreeMap::new(),
             entries: BTreeMap::new(),
-            name_tracker: HashMap::new(),
-            opt_name_tracker: HashMap::new(),
-            types_source_names: BTreeMap::new(),
-            name_collisions_ok: false,
-        }
-    }
-
-    /// Start generating a new schema for a document that passes the validator
-    /// for the given type.
-    ///
-    /// When the schema has been generated, it's recommended practice to take
-    /// the schema hash and compare the generate schema against it in a unit
-    /// test, which can ensure the schema stays stable over time.
-    pub fn new<T: FogValidate>() -> Self {
-        let mut this = Self::init();
-        this.doc = Some((T::validator(&mut this, false), T::validator_type_id(false)));
-        this
-    }
-
-    /// Start generating a new schema for a document that passes the validator
-    /// for the given type, deconflicting names as needed.
-    ///
-    /// Normally, when two [`FogValidate`] implementing types have conflicting
-    /// names, a generator will panic. This function bypasses that and appends
-    /// an underscore and number to the end to deconflict the names, starting
-    /// with the number 0 and incrementing with each new conflict. This
-    /// potentially introduces some big unexpected stability requirement: struct
-    /// field ordering and enum variant ordering must remain the same when
-    /// deriving the [`FogValidate`] trait, and direct implementation must add
-    /// types in the same order. Additionally, if a new field or variant is
-    /// added, the conflict ordering could also change. In all of these cases,
-    /// the conflict resolution mechanism can change the generated schema,
-    /// breaking consistency.
-    ///
-    /// Like with [`new`][SchemaGenerator::new],  it's recommended practice to
-    /// take the schema hash and compare the generated schema against it in a
-    /// unti test, ensuring the schema stays stable over time.
-    pub fn new_allow_name_conflicts<T: FogValidate>() -> Self {
-        let mut this = Self::init();
-        this.name_collisions_ok = true;
-        this.doc = Some((T::validator(&mut this, false), T::validator_type_id(false)));
+            long_names: Vec::new(),
+            ident_tracker: BTreeMap::new(),
+        };
+        this.doc = Some((
+            T::validator(&mut this, false),
+            T::validator_name(false).to_string(),
+        ));
         this
     }
 
@@ -122,7 +163,7 @@ impl SchemaGenerator {
                 EntryItem {
                     validator,
                     compress,
-                    type_id: T::validator_type_id(false),
+                    type_name: T::validator_name(false).to_string(),
                 },
             )
             .is_some()
@@ -141,10 +182,6 @@ impl SchemaGenerator {
     /// Create a validator for a type, returning either the validator itself or
     /// a reference to it. In general, this should only be called by an
     /// implementation of the [`FogValidate`] trait.
-    ///
-    /// Panics
-    /// ------
-    /// This function panics if type name conflicts aren't allowed and one occurs.
     pub fn type_add<T: FogValidate>(&mut self) -> Validator {
         self.type_add_inner::<T>(false)
     }
@@ -155,71 +192,36 @@ impl SchemaGenerator {
     ///
     /// This is specifically for when a type is in a field that has both a
     /// default implementation and has a `skip_serializing_if` attribute.
-    ///
-    /// Panics
-    /// ------
-    /// This function panics if type name conflicts aren't allowed and one occurs.
     pub fn type_add_opt<T: FogValidate>(&mut self) -> Validator {
         self.type_add_inner::<T>(true)
     }
 
     fn type_add_inner<T: FogValidate>(&mut self, opt: bool) -> Validator {
         let opt = opt && T::has_opt();
-        let type_id = T::validator_type_id(opt);
+        let name = T::validator_name(opt);
+        let name_str = name.to_string();
         // Immediately return a ref if it's already been loaded into the schema.
-        if opt {
-            if let Some(name) = self.opt_name_tracker.get(&type_id) {
-                return Validator::new_ref(name);
-            }
-        } else if let Some(name) = self.name_tracker.get(&type_id) {
-            return Validator::new_ref(name);
+        if self.types.contains_key(&name_str) {
+            return Validator::new_ref(name_str);
         }
 
         if T::should_reference(opt) {
-            // Check for name conflict and de-conflict if we are allowed to do so.
-            let name = T::validator_name(opt);
-            let name = if self.types.contains_key(&name) {
-                if !self.name_collisions_ok {
-                    let this_type = std::any::type_name::<T>();
-                    let other_type = self.types_source_names.get(&name).unwrap();
-                    panic!(
-                        "Schema experienced a name conflict for {}, between types {} and {}. \
-                            Try deconflicting the names (ideally) or allow for name conflicts \
-                            during generation",
-                        name, this_type, other_type
-                    );
-                }
-                let mut new_name = name.clone();
-                let mut index = 0;
-                new_name.push_str("_0");
-                while self.types.contains_key(&name) {
-                    new_name.truncate(name.len());
-                    use std::fmt::Write;
-                    index += 1;
-                    write!(new_name, "_{}", index).unwrap();
-                }
-                new_name
-            } else {
-                name
-            };
-
             // CAREFUL ORDERING: We insert our name into both maps immediately,
             // and only then do we generate the validator. In this way,
             // recursive types won't infinitely recurse - they'll stop once they
-            // see their own TypeID in the name tracker. We also need to load a
-            // placeholder validator into the type map, as otherwise another
-            // validator might overwrite our chosen name during a name conflic.
-            if opt {
-                self.opt_name_tracker.insert(type_id, name.clone());
-            } else {
-                self.name_tracker.insert(type_id, name.clone());
-            }
-            self.types_source_names
-                .insert(name.clone(), std::any::type_name::<T>().into());
-            self.types.insert(name.clone(), Validator::Any);
+            // see their own name in the type list. This does require inserting
+            // a placeholder validator, but that's not really a big deal.
+
+            self.types.insert(name_str.clone(), Validator::Any);
+            self.ident_tracker
+                .entry(name.id.name)
+                .or_default()
+                .modify(name.id.mods.iter().copied());
+            self.long_names.push(name);
+
             let validator = T::validator(self, opt);
-            self.types.insert(name.clone(), validator);
-            Validator::new_ref(name)
+            self.types.insert(name_str.clone(), validator);
+            Validator::new_ref(name_str)
         } else {
             T::validator(self, opt)
         }
@@ -238,11 +240,83 @@ impl SchemaGenerator {
     }
 
     pub fn build(self) -> fog_pack::error::Result<Document> {
-        // If the document's validator is in our type list, just use that instead of duplicating it.
-        let (mut doc, doc_id) = self.doc.unwrap();
-        if let Some(name) = self.name_tracker.get(&doc_id) {
-            doc = Validator::new_ref(name);
+        // We're ready to build. Begin by shortening identifiers as much as we can.
+        let mut ident_fixups = HashMap::new();
+        for (k, v) in self.ident_tracker.iter() {
+            let mut state = FixupState {
+                map: &mut ident_fixups,
+                full_mods: Vec::new(),
+                new_mods: Vec::new(),
+                name: k,
+            };
+            v.shorten(&mut state);
         }
+        // With the identifiers shortened, let's try shortening the names
+        let fixups: BTreeMap<String, String> = self
+            .long_names
+            .into_iter()
+            .filter_map(|name| {
+                let new_name = name.try_shorten(&ident_fixups);
+                if new_name != name {
+                    Some((name.to_string(), new_name.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Function to recursively check for references and perform the renaming
+        // as needed. Most of this is to visit every validator in the tree; it's
+        // only the `Validator::Ref` case that needs changing.
+        fn fixup(fixups: &BTreeMap<String, String>, v: &mut Validator) {
+            match v {
+                Validator::Ref(s) => {
+                    if let Some(new_s) = fixups.get(s) {
+                        *s = new_s.clone();
+                    }
+                }
+                Validator::Array(v) => {
+                    v.contains.iter_mut().for_each(|v| fixup(fixups, v));
+                    v.prefix.iter_mut().for_each(|v| fixup(fixups, v));
+                    fixup(fixups, &mut v.items);
+                }
+                Validator::Map(v) => {
+                    v.req.values_mut().for_each(|v| fixup(fixups, v));
+                    v.opt.values_mut().for_each(|v| fixup(fixups, v));
+                    if let Some(v) = &mut v.values {
+                        fixup(fixups, v)
+                    }
+                }
+                Validator::Hash(v) => {
+                    if let Some(v) = &mut v.link {
+                        fixup(fixups, v)
+                    }
+                }
+                Validator::Enum(v) => {
+                    v.0.values_mut().for_each(|v| {
+                        if let Some(v) = v {
+                            fixup(fixups, v)
+                        }
+                    });
+                }
+                Validator::Multi(v) => {
+                    v.0.iter_mut().for_each(|v| fixup(fixups, v));
+                }
+
+                _ => (),
+            }
+        }
+
+        // If the document's validator is in our type list, just use that instead of duplicating it.
+        // We have to check if the name must be shortened too.
+        let (mut doc, doc_id) = self.doc.unwrap();
+        if self.types.contains_key(&doc_id) {
+            doc = Validator::new_ref(doc_id);
+        }
+        // Perform the name shortening
+        fixup(&fixups, &mut doc);
+
+        // Build the schema
         let mut builder = SchemaBuilder::new(doc).regexes(self.max_regex);
         if let Some(v) = self.description {
             builder = builder.description(&v);
@@ -256,17 +330,24 @@ impl SchemaGenerator {
         if let Some(v) = self.version {
             builder = builder.version(v);
         }
-        for (k, v) in self.types {
-            builder = builder.type_add(&k, v);
+        for (k, mut v) in self.entries {
+            // If the entry's validator is in our type list, just use that instead of duplicating it.
+            if self.types.contains_key(&v.type_name) {
+                v.validator = Validator::new_ref(v.type_name);
+            }
+            // Perform the name shortening
+            fixup(&fixups, &mut v.validator);
+            builder = builder.entry_add(&k, v.validator, v.compress);
         }
-        for (k, v) in self.entries {
-            // If the entry'e validator is in our type list, just use that instead of duplicating it.
-            let validator = if let Some(name) = self.name_tracker.get(&v.type_id) {
-                Validator::new_ref(name)
+        for (k, mut v) in self.types {
+            // Perform the name shortening
+            let name = if let Some(name) = fixups.get(&k) {
+                name
             } else {
-                v.validator
+                &k
             };
-            builder = builder.entry_add(&k, validator, v.compress);
+            fixup(&fixups, &mut v);
+            builder = builder.type_add(name, v);
         }
         builder.build()
     }

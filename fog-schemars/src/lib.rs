@@ -3,7 +3,7 @@
 mod gen;
 mod schema_impls;
 
-use std::any::TypeId;
+use std::collections::HashMap;
 
 pub use gen::SchemaGenerator;
 
@@ -12,6 +12,77 @@ use fog_pack::validator::*;
 // Export fog-pack so fog-schemars-derive can always use it
 #[doc(hidden)]
 pub use fog_pack as _fog_pack;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Name {
+    id: Identifier,
+    type_params: Vec<Name>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Identifier {
+    mods: Vec<&'static str>,
+    name: &'static str,
+}
+
+impl std::fmt::Display for Identifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for m in self.mods.iter() {
+            write!(f, "{}::", m)?;
+        }
+        f.write_str(self.name)
+    }
+}
+
+impl Name {
+    pub fn new(path: &'static str, name: &'static str) -> Self {
+        Self::with_types(path, name, Vec::new())
+    }
+
+    pub fn with_types(path: &'static str, name: &'static str, type_params: Vec<Name>) -> Self {
+        assert!(
+            !path.contains([',', '<', '>']),
+            "Path shouldn't contain any of \",<>\""
+        );
+        assert!(
+            !name.contains([',', '<', '>', ':']),
+            "Name shouldn't contain any of \":,<>\""
+        );
+        let mods: Vec<&'static str> = path.split("::").collect();
+        Self {
+            id: Identifier { mods, name },
+            type_params,
+        }
+    }
+
+    pub(crate) fn try_shorten(&self, map: &HashMap<Identifier, Identifier>) -> Name {
+        let id = if let Some(id) = map.get(&self.id) {
+            id.clone()
+        } else {
+            self.id.clone()
+        };
+        let type_params = self
+            .type_params
+            .iter()
+            .map(|p| p.try_shorten(map))
+            .collect();
+        Name { id, type_params }
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.id)?;
+        if let Some((first, rest)) = self.type_params.split_first() {
+            write!(f, "<{}", first)?;
+            for r in rest {
+                write!(f, ",{}", r)?;
+            }
+            f.write_str(">")?;
+        }
+        Ok(())
+    }
+}
 
 #[cfg(feature = "fog-schemars-derive")]
 pub use fog_schemars_derive::*;
@@ -26,7 +97,7 @@ pub use fog_schemars_derive::*;
 /// calls into this trait. This can be thought of as each trait implementation
 /// returning up to two separate validators.
 #[allow(unused_variables)]
-pub trait FogValidate: 'static {
+pub trait FogValidate {
     /// Whether or not the fog-pack Validator for this type should be reused where possible through
     /// a Schema's type list.
     ///
@@ -46,13 +117,19 @@ pub trait FogValidate: 'static {
 
     /// A name to associate with the generated Validator.
     ///
-    /// In the event of a name conflict that the generator is configured to
-    /// resolve, an underscore and a number (starting with 0) are appended to
-    /// this name.
+    /// If deriving a schema automatically, this defaults to the module path
+    /// plus the type name, or the one specified by the serde `rename`
+    /// attribute. Implementors of this trait should prefer the format style of
+    /// `module_path::Type<TypeParam1,TypeParam2>`, where the module path is
+    /// obtained from the [`std::module_path!`] macro.
     ///
-    /// If deriving a schema automatically, this defaults to the type name, or
-    /// the one specified by the serde `rename` attribute.
-    fn validator_name(opt: bool) -> String;
+    /// When completing the schema, module paths are shortened if there are no
+    /// conflicts. Examples, for a type named "Config":
+    /// - `crate::foo::Config` and `crate::bar::Config` will shorten to
+    ///   `foo::Config` and `bar::Config`.
+    /// - `foo::thing::Config` and `bar::thing::Config` will not change.
+    ///
+    fn validator_name(opt: bool) -> Name;
 
     /// Generates a fog-pack validator for this type.
     ///
@@ -62,14 +139,4 @@ pub trait FogValidate: 'static {
     ///
     /// This shouldn't ever return a [`Validator::Ref`].
     fn validator(gen: &mut SchemaGenerator, opt: bool) -> Validator;
-
-    /// The unique TypeId of this type. You shouldn't be overriding this unless
-    /// this validator is completely transparent to another type's validator, in
-    /// which case this, along with every other one of this trait's functions,
-    /// should forward to said type's [`FogValidate`] implementations. Doing so
-    /// will ensure fewer redundant validator definitions.
-    fn validator_type_id(opt: bool) -> TypeId {
-        TypeId::of::<Self>()
-    }
-
 }

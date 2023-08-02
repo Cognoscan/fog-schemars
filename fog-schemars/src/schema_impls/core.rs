@@ -1,29 +1,38 @@
-use std::any::TypeId;
 use std::ops::Bound;
 
-use crate::gen::SchemaGenerator;
-use crate::FogValidate;
+use crate::{SchemaGenerator, FogValidate, Name};
 use fog_pack::types::Value;
 use fog_pack::validator::*;
 
-impl<T: FogValidate> FogValidate for Option<T> {
-    fn has_opt() -> bool {
-        true
+impl FogValidate for () {
+    no_ref_validator!();
+    has_opt!();
+
+    fn validator_name(opt: bool) -> Name {
+        Name::new("", if opt { "!" } else { "unit" })
     }
 
-    fn validator_name(opt: bool) -> String {
+    fn validator(_: &mut SchemaGenerator, opt: bool) -> Validator {
+        if opt {
+            // A boolean that will never succeed, because this value should
+            // never be generated
+            BoolValidator::new().nin_add(false).nin_add(true).build()
+        } else {
+            Validator::Null
+        }
+    }
+}
+
+forward_impl!((<T: ?Sized> FogValidate for std::marker::PhantomData<T>) => ());
+
+impl<T: FogValidate> FogValidate for Option<T> {
+    has_opt!();
+
+    fn validator_name(opt: bool) -> Name {
         if opt {
             T::validator_name(false)
         } else {
-            format!("Option_{}", T::validator_name(false))
-        }
-    }
-
-    fn validator_type_id(opt: bool) -> TypeId {
-        if opt {
-            T::validator_type_id(false)
-        } else {
-            TypeId::of::<Self>()
+            Name::with_types("std::option", "Option", vec![T::validator_name(false)])
         }
     }
 
@@ -54,11 +63,11 @@ impl<T: FogValidate> FogValidate for Option<T> {
 }
 
 impl<T: FogValidate, E: FogValidate> FogValidate for Result<T, E> {
-    fn validator_name(_: bool) -> String {
-        format!(
-            "Result_{}_{}",
-            T::validator_name(false),
-            E::validator_name(false)
+    fn validator_name(_: bool) -> Name {
+        Name::with_types(
+            "std::result",
+            "Result",
+            vec![T::validator_name(false), E::validator_name(false)],
         )
     }
 
@@ -71,8 +80,8 @@ impl<T: FogValidate, E: FogValidate> FogValidate for Result<T, E> {
 }
 
 impl<T: FogValidate> FogValidate for Bound<T> {
-    fn validator_name(_: bool) -> String {
-        format!("Bound_{}", T::validator_name(false))
+    fn validator_name(_: bool) -> Name {
+        Name::with_types("std::ops", "Bound", vec![T::validator_name(false)])
     }
 
     fn validator(gen: &mut SchemaGenerator, _: bool) -> Validator {
@@ -89,15 +98,13 @@ where
     Idx: Default,
     Value: From<Idx>,
 {
-    fn has_opt() -> bool {
-        true
-    }
+    has_opt!();
 
-    fn validator_name(opt: bool) -> String {
+    fn validator_name(opt: bool) -> Name {
         if opt {
-            format!("Opt_Range_{}", Idx::validator_name(false))
+            Name::with_types("std::ops", "OptRange", vec![Idx::validator_name(false)])
         } else {
-            format!("Range_{}", Idx::validator_name(false))
+            Name::with_types("std::ops", "Range", vec![Idx::validator_name(false)])
         }
     }
 
@@ -118,5 +125,58 @@ where
                 .req_add("end", Idx::validator(gen, false))
                 .build()
         }
+    }
+}
+
+impl<Idx: FogValidate> FogValidate for std::ops::RangeInclusive<Idx>
+where
+    Idx: Default,
+    Value: From<Idx>,
+{
+    fn validator_name(_: bool) -> Name {
+        Name::with_types(
+            "std::ops",
+            "RangeInclusive",
+            vec![Idx::validator_name(false)],
+        )
+    }
+
+    fn validator(gen: &mut SchemaGenerator, _: bool) -> Validator {
+        MapValidator::new()
+            .req_add("start", Idx::validator(gen, false))
+            .req_add("end", Idx::validator(gen, false))
+            .build()
+    }
+}
+
+impl<Idx: FogValidate> FogValidate for std::ops::RangeFrom<Idx>
+where
+    Idx: Default,
+    Value: From<Idx>,
+{
+    fn validator_name(_: bool) -> Name {
+        Name::with_types("std::ops", "RangeFrom", vec![Idx::validator_name(false)])
+    }
+
+    fn validator(gen: &mut SchemaGenerator, _: bool) -> Validator {
+        MapValidator::new()
+            .req_add("start", Idx::validator(gen, false))
+            .build()
+    }
+}
+
+impl<Idx: FogValidate> FogValidate for std::ops::RangeTo<Idx>
+where
+    Idx: Default,
+    Value: From<Idx>,
+{
+    fn validator_name(_: bool) -> Name {
+        Name::with_types("std::ops", "RangeTo", vec![Idx::validator_name(false)])
+    }
+
+    fn validator(gen: &mut SchemaGenerator, _: bool) -> Validator {
+        MapValidator::new()
+            .req_add("end", Idx::validator(gen, false))
+            .build()
     }
 }

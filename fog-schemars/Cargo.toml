@@ -15,18 +15,21 @@ categories = ["encoding"]
 
 [dependencies]
 fog-pack = "0.4"
-fog-schemars-derive = { version = "=0.1.0", optional = true, path = "../fog-schemars-derive" }
+#fog-schemars-derive = { version = "=0.1.0", optional = true, path = "../fog-schemars-derive" }
 serde = { version = "1.0", features = ["derive"] }
 
-chrono = { version = "0.4", default-features = false, optional = true }
 uuid = { version = "1.0", default-features = false, optional = true }
-smallvec = { version = "1.0", optional = true }
-bytes = { version = "1.0", optional = true }
+
+smallvec = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+serde_bytes = { version = "0.11", optional = true }
+
 smol_str = { version = "0.2", optional = true }
+smallstr = { version = "0.3", optional = true }
+smartstring = { version = "1", optional = true }
+
 
 [features]
-default = ["derive"]
+#default = ["derive"]
 
-derive = ["fog-schemars-derive"]
-
-impl_fog_schema = ["derive"]
+#derive = ["fog-schemars-derive"]
