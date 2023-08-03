@@ -337,7 +337,7 @@ validator_impl!(StrValidator => {
 validator_impl!(ArrayValidator => {
     "comment": String,
     "contains": Vec<Validator>,
-    "items": Box<Validator>,
+    "items": Option<Validator>,
     "prefix": Vec<Validator>,
     "max_len": IntMaxU32Default,
     "min_len": u32,
@@ -355,8 +355,8 @@ validator_impl!(MapValidator => {
     "comment": String,
     "max_len": IntMaxU32Default,
     "min_len": u32,
-    "keys": Option<String>,
-    "values": Validator,
+    "keys": Option<StrValidator>,
+    "values": Option<Validator>,
     "req": BTreeMap<String, Validator>,
     "opt": BTreeMap<String, Validator>,
     "in": Vec<BTreeMap<String, Value>>,
@@ -413,7 +413,7 @@ macro_rules! lockbox_validators{
                 "comment": String,
                 "max_len": IntMaxU32Default,
                 "min_len": u32,
-                "query": bool
+                "size": bool
             });
         )+
     };
